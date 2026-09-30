@@ -20,7 +20,8 @@
 #define A_TX 0x03 // tramas do emissor / respostas do recetor
 #define A_RX 0x01 // tramas do recetor / respostas do emissor
 
-#define C_SET 0x03
+#define C_SET 0x03  // 0x03 identifa comandos do emissor e respostas do recetor
+// como SET é comando do emissor e UA resposta recetor a esse comando, usamos o mesmo
 #define C_UA  0x07
 
 ////////////////////////////////////////////////
@@ -37,6 +38,7 @@ typedef enum
 } FrameState;
 
 // Envia uma trama de supervisão [FLAG, A, C, BCC1, FLAG]
+//monta o array e escreve-o na porta
 static int sendSupervisionFrame(unsigned char a, unsigned char c)
 {
     unsigned char frame[5] = {FLAG, a, c, a ^ c, FLAG};
@@ -73,7 +75,7 @@ static int receiveSupervisionFrame(unsigned char a, unsigned char c)
             return -1;
         }
         if (res == 0)
-            continue; // nenhum byte lido desta vez, tenta outra vez
+            continue; // nenhum byte lido, tentar outra vez
 
         printf("Byte recebido: 0x%02X\n", byte);
 
