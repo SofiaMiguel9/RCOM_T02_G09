@@ -29,3 +29,4 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
         return;
     }
 }
+
