@@ -1,7 +1,3 @@
-// RCOM 2026/2027
-//
-// Link layer protocol implementation
-
 #define _POSIX_C_SOURCE 200809L
 
 #include "link_layer.h"
@@ -12,24 +8,16 @@
 #include <stdio.h>
 #include <unistd.h>
 
-// MISC
 #define BUF_SIZE 256
 
-////////////////////////////////////////////////
-// CONSTANTES DO PROTOCOLO
-////////////////////////////////////////////////
 #define FLAG 0x7E
 
-#define A_TX 0x03 // tramas do emissor / respostas do recetor
-#define A_RX 0x01 // tramas do recetor / respostas do emissor
+#define A_TX 0x03
+#define A_RX 0x01
 
-#define C_SET 0x03  // 0x03 identifa comandos do emissor e respostas do recetor
-// como SET é comando do emissor e UA resposta recetor a esse comando, usamos o mesmo
+#define C_SET 0x03
 #define C_UA  0x07
 
-////////////////////////////////////////////////
-// MÁQUINA DE ESTADOS
-////////////////////////////////////////////////
 typedef enum
 {
     ST_START,
@@ -48,8 +36,6 @@ static void alarmHandler(int signalNumber)
     alarmTriggered = TRUE;
 }
 
-// Envia uma trama de supervisão [FLAG, A, C, BCC1, FLAG]
-//monta o array e escreve-o na porta
 static int sendSupervisionFrame(unsigned char a, unsigned char c)
 {
     unsigned char frame[5] = {FLAG, a, c, a ^ c, FLAG};
@@ -69,9 +55,6 @@ static int sendSupervisionFrame(unsigned char a, unsigned char c)
     return 0;
 }
 
-// Lê byte a byte até reconhecer uma trama de supervisão válida
-// com o endereço 'a' e o controlo 'c' esperados.
-// Returns 0 for a valid frame, 1 for a timeout, or -1 for a read error.
 static int receiveSupervisionFrame(unsigned char a, unsigned char c, int useTimeout)
 {
     FrameState state = ST_START;
@@ -89,7 +72,7 @@ static int receiveSupervisionFrame(unsigned char a, unsigned char c, int useTime
             return -1;
         }
         if (res == 0)
-            continue; // nenhum byte lido, tentar outra vez
+            continue;
 
         printf("Byte recebido: 0x%02X\n", byte);
 
@@ -103,7 +86,7 @@ static int receiveSupervisionFrame(unsigned char a, unsigned char c, int useTime
         case ST_FLAG_RCV:
             if (byte == a)
                 state = ST_A_RCV;
-            else if (byte != FLAG) // FLAG repetida -> fica onde está
+            else if (byte != FLAG)
                 state = ST_START;
             break;
 
@@ -122,7 +105,7 @@ static int receiveSupervisionFrame(unsigned char a, unsigned char c, int useTime
             else if (byte == FLAG)
                 state = ST_FLAG_RCV;
             else
-                state = ST_START; // BCC errado -> descarta a trama
+                state = ST_START;
             break;
 
         case ST_BCC_OK:
@@ -141,9 +124,6 @@ static int receiveSupervisionFrame(unsigned char a, unsigned char c, int useTime
     return state == ST_STOP ? 0 : 1;
 }
 
-////////////////////////////////////////////////
-// LLOPEN
-////////////////////////////////////////////////
 int llOpenTx(LinkLayer llParameters)
 {
     if (llParameters.timeout <= 0 || llParameters.nRetransmissions < 0)
@@ -165,7 +145,6 @@ int llOpenTx(LinkLayer llParameters)
     act.sa_handler = alarmHandler;
     sigemptyset(&act.sa_mask);
 
-    // Leave SA_RESTART disabled so SIGALRM interrupts the blocking serial read.
     if (sigaction(SIGALRM, &act, &previousAct) == -1)
     {
         perror("sigaction");
@@ -212,7 +191,6 @@ int llOpenTx(LinkLayer llParameters)
     if (result < 0)
         closeSerialPort();
 
-    // NOTA: a porta fica aberta, vai ser usada no llSend e fechada no llCloseTx
     return result;
 }
 
@@ -226,13 +204,11 @@ int llOpenRx(LinkLayer llParameters)
 
     printf("Serial port %s opened\n", llParameters.serialPort);
 
-    // 1. Esperar pelo SET (enviado pelo emissor: A = 0x03)
     if (receiveSupervisionFrame(A_TX, C_SET, FALSE) < 0)
         return -1;
 
     printf("SET recebido.\n");
 
-    // 2. Responder com UA
     if (sendSupervisionFrame(A_TX, C_UA) < 0)
         return -1;
 
@@ -241,34 +217,21 @@ int llOpenRx(LinkLayer llParameters)
     return 0;
 }
 
-////////////////////////////////////////////////
-// LLSEND
-////////////////////////////////////////////////
 int llSend(const unsigned char *buf, int bufSize)
 {
-    // TODO: Implement this function
 
     return 0;
 }
 
-////////////////////////////////////////////////
-// LLRECEIVE
-////////////////////////////////////////////////
 int llReceive(unsigned char *packet)
 {
-    // TODO: Implement this function
 
     return 0;
 }
 
-////////////////////////////////////////////////
-// LLCLOSE
-////////////////////////////////////////////////
 int llCloseTx()
 {
-    // TODO: DISC -> DISC -> UA
 
-    // Para já só fecha a porta
     if (closeSerialPort() < 0)
     {
         perror("closeSerialPort");
@@ -280,9 +243,7 @@ int llCloseTx()
 
 int llCloseRx()
 {
-    // TODO: DISC -> DISC -> UA
 
-    // Para já só fecha a porta
     if (closeSerialPort() < 0)
     {
         perror("closeSerialPort");

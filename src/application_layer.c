@@ -1,7 +1,3 @@
-// RCOM 2026/2027
-//
-// Application layer protocol implementation
-
 #include "application_layer.h"
 #include "link_layer.h"
 
@@ -11,9 +7,6 @@
 void applicationLayer(const char *serialPort, const char *role, int baudRate,
                       int nTries, int timeout, const char *filename)
 {
-    // ----------------------------------------------------
-    // TODO: Adapt and extend this code according to the specifications of the project.
-    // ----------------------------------------------------
 
     LinkLayer llParameters = {
         .baudRate = baudRate,
