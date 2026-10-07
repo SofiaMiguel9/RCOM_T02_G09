@@ -2,14 +2,17 @@
 //
 // Link layer protocol implementation
 
+#define _POSIX_C_SOURCE 200809L
+
 #include "link_layer.h"
 #include "serial_port.h"
 
+#include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <unistd.h>
 
 // MISC
-#define _POSIX_SOURCE 1 // POSIX compliant source
 #define BUF_SIZE 256
 
 ////////////////////////////////////////////////
@@ -37,6 +40,14 @@ typedef enum
     ST_STOP
 } FrameState;
 
+static volatile sig_atomic_t alarmTriggered = FALSE;
+
+static void alarmHandler(int signalNumber)
+{
+    (void)signalNumber;
+    alarmTriggered = TRUE;
+}
+
 // Envia uma trama de supervisão [FLAG, A, C, BCC1, FLAG]
 //monta o array e escreve-o na porta
 static int sendSupervisionFrame(unsigned char a, unsigned char c)
@@ -60,17 +71,20 @@ static int sendSupervisionFrame(unsigned char a, unsigned char c)
 
 // Lê byte a byte até reconhecer uma trama de supervisão válida
 // com o endereço 'a' e o controlo 'c' esperados.
-static int receiveSupervisionFrame(unsigned char a, unsigned char c)
+// Returns 0 for a valid frame, 1 for a timeout, or -1 for a read error.
+static int receiveSupervisionFrame(unsigned char a, unsigned char c, int useTimeout)
 {
     FrameState state = ST_START;
 
-    while (state != ST_STOP)
+    while (state != ST_STOP && (!useTimeout || !alarmTriggered))
     {
         unsigned char byte;
         int res = readByteSerialPort(&byte);
 
         if (res < 0)
         {
+            if (errno == EINTR)
+                continue;
             perror("readByteSerialPort");
             return -1;
         }
@@ -124,7 +138,7 @@ static int receiveSupervisionFrame(unsigned char a, unsigned char c)
         }
     }
 
-    return 0;
+    return state == ST_STOP ? 0 : 1;
 }
 
 ////////////////////////////////////////////////
@@ -132,6 +146,12 @@ static int receiveSupervisionFrame(unsigned char a, unsigned char c)
 ////////////////////////////////////////////////
 int llOpenTx(LinkLayer llParameters)
 {
+    if (llParameters.timeout <= 0 || llParameters.nRetransmissions < 0)
+    {
+        printf("Invalid timeout or retransmission limit\n");
+        return -1;
+    }
+
     if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
     {
         perror("openSerialPort");
@@ -140,18 +160,60 @@ int llOpenTx(LinkLayer llParameters)
 
     printf("Serial port %s opened\n", llParameters.serialPort);
 
-    // 1. Enviar SET
-    if (sendSupervisionFrame(A_TX, C_SET) < 0)
-        return -1;
+    struct sigaction act = {0};
+    struct sigaction previousAct;
+    act.sa_handler = alarmHandler;
+    sigemptyset(&act.sa_mask);
 
-    // 2. Esperar pela UA (resposta do recetor -> A = 0x03)
-    if (receiveSupervisionFrame(A_TX, C_UA) < 0)
+    // Leave SA_RESTART disabled so SIGALRM interrupts the blocking serial read.
+    if (sigaction(SIGALRM, &act, &previousAct) == -1)
+    {
+        perror("sigaction");
+        closeSerialPort();
         return -1;
+    }
 
-    printf("UA recebida. Ligacao estabelecida!\n");
+    int result = -1;
+    for (int attempt = 0; ; attempt++)
+    {
+        if (sendSupervisionFrame(A_TX, C_SET) < 0)
+            break;
+
+        alarmTriggered = FALSE;
+        alarm(llParameters.timeout);
+        int received = receiveSupervisionFrame(A_TX, C_UA, TRUE);
+        alarm(0);
+
+        if (received == 0)
+        {
+            printf("UA recebida. Ligacao estabelecida!\n");
+            result = 0;
+            break;
+        }
+        if (received < 0)
+            break;
+
+        printf("Timeout: UA nao recebida.\n");
+        if (attempt == llParameters.nRetransmissions)
+        {
+            printf("Limite de retransmissoes atingido. Ligacao nao estabelecida.\n");
+            break;
+        }
+        printf("Retransmissao SET %d de %d\n", attempt + 1,
+               llParameters.nRetransmissions);
+    }
+
+    alarm(0);
+    if (sigaction(SIGALRM, &previousAct, NULL) == -1)
+    {
+        perror("sigaction");
+        result = -1;
+    }
+    if (result < 0)
+        closeSerialPort();
 
     // NOTA: a porta fica aberta, vai ser usada no llSend e fechada no llCloseTx
-    return 0;
+    return result;
 }
 
 int llOpenRx(LinkLayer llParameters)
@@ -165,7 +227,7 @@ int llOpenRx(LinkLayer llParameters)
     printf("Serial port %s opened\n", llParameters.serialPort);
 
     // 1. Esperar pelo SET (enviado pelo emissor: A = 0x03)
-    if (receiveSupervisionFrame(A_TX, C_SET) < 0)
+    if (receiveSupervisionFrame(A_TX, C_SET, FALSE) < 0)
         return -1;
 
     printf("SET recebido.\n");
