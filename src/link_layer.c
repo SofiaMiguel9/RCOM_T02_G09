@@ -1,5 +1,5 @@
 // Link layer protocol implementation
-// RCOM 2026/2027 - Lab 1 (M2 + M3 + M4)
+// RCOM 2026/2027 - Lab 1 (M2 + M3 + M4 + M5)
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -10,6 +10,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 // ---------------------------------------------------------------------------
@@ -64,6 +65,24 @@ typedef struct
 static LinkLayer linkParams; // guardado no llOpen, usado no llSend
 static int txNs = 0;         // Ns da proxima trama I a enviar (emissor)
 static int rxExpected = 0;   // Ns da proxima trama I esperada (recetor)
+
+// Estatisticas do protocolo (mostradas no llClose)
+typedef struct
+{
+    int framesSent;       // todas as tramas escritas (I + supervisao)
+    int framesReceived;   // tramas recebidas com cabecalho valido
+    int iFramesSent;      // tramas I enviadas (inclui retransmissoes)
+    int iFramesAccepted;  // tramas I novas entregues a aplicacao
+    int retransmissions;  // reenvios (SET, I ou DISC)
+    int timeouts;         // timeouts do alarme
+    int rejSent;          // REJ enviados (erro nos dados)
+    int rejReceived;      // REJ recebidos
+    int duplicates;       // tramas I duplicadas descartadas
+    long payloadBytes;    // bytes de dados confirmados / entregues
+    struct timespec start;
+} Statistics;
+
+static Statistics stats;
 
 static volatile sig_atomic_t alarmTriggered = FALSE;
 static struct sigaction previousAct;
@@ -162,6 +181,7 @@ static int sendSupervisionFrame(unsigned char a, unsigned char c)
     if (writeFrame(frame, 5) < 0)
         return -1;
 
+    stats.framesSent++;
     printf("Enviada %s\n", frameName(c));
     return 0;
 }
@@ -283,6 +303,7 @@ static int receiveFrame(unsigned char a, Frame *f, int useTimeout)
         }
     }
 
+    stats.framesReceived++;
     f->hasData = (len > 0);
     if (!f->hasData)
     {
@@ -343,6 +364,8 @@ int llOpenTx(LinkLayer llParameters)
 
     linkParams = llParameters;
     txNs = 0;
+    memset(&stats, 0, sizeof(stats));
+    clock_gettime(CLOCK_MONOTONIC, &stats.start);
 
     if (openSerialPort(linkParams.serialPort, linkParams.baudRate) < 0)
     {
@@ -363,7 +386,10 @@ int llOpenTx(LinkLayer llParameters)
     for (int attempt = 0; attempt <= linkParams.nRetransmissions; attempt++)
     {
         if (attempt > 0)
+        {
+            stats.retransmissions++;
             printf("Retransmissao SET %d de %d\n", attempt, linkParams.nRetransmissions);
+        }
 
         if (sendSupervisionFrame(A_TX, C_SET) < 0)
             break;
@@ -381,6 +407,7 @@ int llOpenTx(LinkLayer llParameters)
         if (r < 0)
             break;
 
+        stats.timeouts++;
         printf("Timeout: UA nao recebida.\n");
     }
 
@@ -394,6 +421,8 @@ int llOpenRx(LinkLayer llParameters)
 {
     linkParams = llParameters;
     rxExpected = 0;
+    memset(&stats, 0, sizeof(stats));
+    clock_gettime(CLOCK_MONOTONIC, &stats.start);
 
     if (openSerialPort(linkParams.serialPort, linkParams.baudRate) < 0)
     {
@@ -459,11 +488,16 @@ int llSend(const unsigned char *buf, int bufSize)
     for (int attempt = 0; attempt <= linkParams.nRetransmissions; attempt++)
     {
         if (attempt > 0)
+        {
+            stats.retransmissions++;
             printf("Retransmissao I%d (%d de %d)\n", txNs, attempt,
                    linkParams.nRetransmissions);
+        }
 
         if (writeFrame(frame, len) < 0)
             return -1;
+        stats.framesSent++;
+        stats.iFramesSent++;
         printf("Enviada I%d (%d bytes de dados)\n", txNs, bufSize);
 
         unsigned char reply;
@@ -476,6 +510,7 @@ int llSend(const unsigned char *buf, int bufSize)
 
         if (r == 0)
         {
+            stats.timeouts++;
             printf("Timeout: sem resposta a I%d\n", txNs);
             continue;
         }
@@ -483,10 +518,12 @@ int llSend(const unsigned char *buf, int bufSize)
         if (reply == C_RR(1 - txNs))
         {
             printf("Recebido %s\n", frameName(reply));
+            stats.payloadBytes += bufSize;
             txNs = 1 - txNs;
             return bufSize;
         }
 
+        stats.rejReceived++;
         printf("Recebido %s: erro nos dados, a retransmitir\n", frameName(reply));
     }
 
@@ -528,6 +565,7 @@ int llReceive(unsigned char *packet)
             if (ns == rxExpected)
             {
                 printf("Erro nos dados de I%d\n", ns);
+                stats.rejSent++;
                 if (sendSupervisionFrame(A_TX, C_REJ(ns)) < 0)
                     return -1;
             }
@@ -544,6 +582,7 @@ int llReceive(unsigned char *packet)
         {
             // O RR anterior perdeu-se e o emissor reenviou: confirmar e descartar
             printf("I%d duplicada: descartada\n", ns);
+            stats.duplicates++;
             if (sendSupervisionFrame(A_TX, C_RR(rxExpected)) < 0)
                 return -1;
             continue;
@@ -552,6 +591,8 @@ int llReceive(unsigned char *packet)
         // Trama nova e sem erros: entregar a aplicacao e confirmar
         memcpy(packet, f.data, f.dataLen);
         printf("Recebida I%d (%d bytes de dados)\n", ns, f.dataLen);
+        stats.iFramesAccepted++;
+        stats.payloadBytes += f.dataLen;
 
         rxExpected = 1 - rxExpected;
         if (sendSupervisionFrame(A_TX, C_RR(rxExpected)) < 0)
@@ -561,9 +602,91 @@ int llReceive(unsigned char *packet)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Fecho e estatisticas
+// ---------------------------------------------------------------------------
+
+static void printStatistics(const char *role)
+{
+    struct timespec end;
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    double elapsed = (end.tv_sec - stats.start.tv_sec) +
+                     (end.tv_nsec - stats.start.tv_nsec) / 1e9;
+
+    printf("\n===== Estatisticas (%s) =====\n", role);
+    printf("Tempo total:              %.3f s\n", elapsed);
+    printf("Tramas enviadas:          %d\n", stats.framesSent);
+    printf("Tramas recebidas:         %d\n", stats.framesReceived);
+    if (strcmp(role, "tx") == 0)
+    {
+        printf("Tramas I enviadas:        %d\n", stats.iFramesSent);
+        printf("Retransmissoes:           %d\n", stats.retransmissions);
+        printf("Timeouts:                 %d\n", stats.timeouts);
+        printf("REJ recebidos:            %d\n", stats.rejReceived);
+        printf("Bytes de dados enviados:  %ld\n", stats.payloadBytes);
+    }
+    else
+    {
+        printf("Tramas I aceites:         %d\n", stats.iFramesAccepted);
+        printf("Tramas I duplicadas:      %d\n", stats.duplicates);
+        printf("REJ enviados:             %d\n", stats.rejSent);
+        printf("Retransmissoes (DISC):    %d\n", stats.retransmissions);
+        printf("Timeouts:                 %d\n", stats.timeouts);
+        printf("Bytes de dados recebidos: %ld\n", stats.payloadBytes);
+    }
+    if (elapsed > 0)
+    {
+        double bitrate = stats.payloadBytes * 8 / elapsed;
+        printf("Debito util (R):          %.1f bit/s\n", bitrate);
+        printf("Eficiencia (R/C):         %.4f\n", bitrate / linkParams.baudRate);
+    }
+    printf("================================\n");
+}
+
+// Emissor: DISC -> (espera DISC) -> UA
 int llCloseTx()
 {
-    // TODO (M5): DISC -> DISC -> UA e estatisticas
+    int result = -1;
+    const unsigned char accepted[] = {C_DISC};
+
+    for (int attempt = 0; attempt <= linkParams.nRetransmissions; attempt++)
+    {
+        if (attempt > 0)
+        {
+            stats.retransmissions++;
+            printf("Retransmissao DISC %d de %d\n", attempt, linkParams.nRetransmissions);
+        }
+
+        if (sendSupervisionFrame(A_TX, C_DISC) < 0)
+            break;
+
+        // O DISC do recetor e um comando do recetor: A = 0x01
+        unsigned char reply;
+        startTimer();
+        int r = waitForReply(A_RX, accepted, 1, &reply);
+        stopTimer();
+
+        if (r < 0)
+            break;
+        if (r == 1)
+        {
+            printf("DISC recebido.\n");
+            // UA e resposta a um comando do recetor: A = 0x01
+            if (sendSupervisionFrame(A_RX, C_UA) == 0)
+                result = 0;
+            break;
+        }
+
+        stats.timeouts++;
+        printf("Timeout: DISC nao recebido.\n");
+    }
+
+    if (result == 0)
+        printf("Ligacao terminada!\n");
+    else
+        printf("Erro a terminar a ligacao.\n");
+
+    printStatistics("tx");
     restoreAlarm();
 
     if (closeSerialPort() < 0)
@@ -572,12 +695,81 @@ int llCloseTx()
         return -1;
     }
 
-    return 0;
+    return result;
 }
 
+// Recetor: (espera DISC) -> DISC -> (espera UA)
 int llCloseRx()
 {
-    // TODO (M5): DISC -> DISC -> UA e estatisticas
+    int result = -1;
+    Frame f;
+
+    if (installAlarm() < 0)
+    {
+        closeSerialPort();
+        return -1;
+    }
+
+    // Esperar pelo DISC do emissor
+    while (TRUE)
+    {
+        if (receiveFrame(A_TX, &f, FALSE) < 0)
+            goto out;
+
+        if (!f.hasData && f.c == C_DISC)
+            break;
+
+        // A ultima trama I foi reenviada (o RR perdeu-se): voltar a confirmar
+        if (f.hasData && (f.c == C_I(0) || f.c == C_I(1)))
+        {
+            printf("I%d duplicada: descartada\n", f.c == C_I(1));
+            stats.duplicates++;
+            if (sendSupervisionFrame(A_TX, C_RR(rxExpected)) < 0)
+                goto out;
+        }
+    }
+    printf("DISC recebido.\n");
+
+    const unsigned char accepted[] = {C_UA};
+
+    for (int attempt = 0; attempt <= linkParams.nRetransmissions; attempt++)
+    {
+        if (attempt > 0)
+        {
+            stats.retransmissions++;
+            printf("Retransmissao DISC %d de %d\n", attempt, linkParams.nRetransmissions);
+        }
+
+        // DISC do recetor e um comando do recetor: A = 0x01
+        if (sendSupervisionFrame(A_RX, C_DISC) < 0)
+            break;
+
+        unsigned char reply;
+        startTimer();
+        int r = waitForReply(A_RX, accepted, 1, &reply);
+        stopTimer();
+
+        if (r < 0)
+            break;
+        if (r == 1)
+        {
+            printf("UA recebida.\n");
+            result = 0;
+            break;
+        }
+
+        stats.timeouts++;
+        printf("Timeout: UA nao recebida.\n");
+    }
+
+out:
+    if (result == 0)
+        printf("Ligacao terminada!\n");
+    else
+        printf("Erro a terminar a ligacao.\n");
+
+    printStatistics("rx");
+    restoreAlarm();
 
     if (closeSerialPort() < 0)
     {
@@ -585,5 +777,5 @@ int llCloseRx()
         return -1;
     }
 
-    return 0;
+    return result;
 }
