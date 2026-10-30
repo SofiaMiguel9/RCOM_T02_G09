@@ -65,6 +65,7 @@ typedef struct
 static LinkLayer linkParams; // guardado no llOpen, usado no llSend
 static int txNs = 0;         // Ns da proxima trama I a enviar (emissor)
 static int rxExpected = 0;   // Ns da proxima trama I esperada (recetor)
+static int rxDiscPending = FALSE;
 
 // Estatisticas do protocolo (mostradas no llClose)
 typedef struct
@@ -436,6 +437,7 @@ int llOpenRx(LinkLayer llParameters)
 {
     linkParams = llParameters;
     rxExpected = 0;
+    rxDiscPending = FALSE;
     memset(&stats, 0, sizeof(stats));
     clock_gettime(CLOCK_MONOTONIC, &stats.start);
 
@@ -573,6 +575,12 @@ int llReceive(unsigned char *packet)
 
         if (!f.hasData)
         {
+            if (f.c == C_DISC)
+            {
+                rxDiscPending = TRUE;
+                printf("DISC recebido antes do fim da transferencia\n");
+                return -1;
+            }
             // A UA do llOpen perdeu-se e o emissor voltou a mandar SET
             if (f.c == C_SET)
             {
@@ -772,7 +780,7 @@ int llCloseRx()
     }
 
     // Esperar pelo DISC do emissor
-    while (TRUE)
+    while (!rxDiscPending)
     {
         if (receiveFrame(A_TX, &f, FALSE) < 0)
             goto out;
@@ -789,6 +797,7 @@ int llCloseRx()
                 goto out;
         }
     }
+    rxDiscPending = FALSE;
     printf("DISC recebido.\n");
 
     const unsigned char accepted[] = {C_UA};
