@@ -168,11 +168,23 @@ static const char *frameName(unsigned char c)
 
 static int writeFrame(const unsigned char *frame, int len)
 {
-    int written = writeBytesSerialPort(frame, len);
-    if (written != len)
+    int total = 0;
+    while (total < len)
     {
-        printf("Erro a enviar trama (%d de %d bytes)\n", written, len);
-        return -1;
+        int written = writeBytesSerialPort(frame + total, len - total);
+        if (written < 0)
+        {
+            if (errno == EINTR)
+                continue;
+            perror("writeBytesSerialPort");
+            return -1;
+        }
+        if (written == 0)
+        {
+            printf("Erro a enviar trama (%d de %d bytes)\n", total, len);
+            return -1;
+        }
+        total += written;
     }
     return 0;
 }
