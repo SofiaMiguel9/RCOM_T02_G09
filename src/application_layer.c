@@ -1,6 +1,3 @@
-// Application layer protocol implementation
-// RCOM 2026/2027 - Lab 1 (M5)
-
 #include "application_layer.h"
 #include "link_layer.h"
 
@@ -8,32 +5,22 @@
 #include <stdio.h>
 #include <string.h>
 
-// Campo C dos pacotes
 #define C_START 1
 #define C_DATA 2
 #define C_END 3
 
-// Tipos dos parametros TLV
 #define T_FILE_SIZE 0
 #define T_FILE_NAME 1
 
-// Cabecalho de um pacote de dados: C L2 L1
 #define DATA_HEADER_SIZE 3
 #define MAX_FRAGMENT_SIZE (MAX_PAYLOAD_SIZE - DATA_HEADER_SIZE)
 
-// ---------------------------------------------------------------------------
-// Pacotes de controlo: C [T L V] [T L V]
-// ---------------------------------------------------------------------------
-
-// Constroi um pacote START/END com o tamanho e o nome do ficheiro.
-// Devolve o tamanho do pacote ou -1 se nao couber.
 static int buildControlPacket(unsigned char c, long fileSize, const char *fileName,
                               unsigned char *packet)
 {
     int len = 0;
     packet[len++] = c;
 
-    // Tamanho: numero minimo de bytes, big-endian
     unsigned char sizeBytes[sizeof(long)];
     int nSize = 0;
     long tmp = fileSize;
@@ -48,7 +35,6 @@ static int buildControlPacket(unsigned char c, long fileSize, const char *fileNa
     for (int i = nSize - 1; i >= 0; i--)
         packet[len++] = sizeBytes[i];
 
-    // Nome
     int nameLen = strlen(fileName);
     if (nameLen > 255 || len + 2 + nameLen > MAX_PAYLOAD_SIZE)
         return -1;
@@ -61,14 +47,13 @@ static int buildControlPacket(unsigned char c, long fileSize, const char *fileNa
     return len;
 }
 
-// Le os TLV de um pacote START/END. Devolve 0 em sucesso, -1 se mal formado.
 static int parseControlPacket(const unsigned char *packet, int size,
                               long *fileSize, char *fileName, int nameMax)
 {
     *fileSize = -1;
     fileName[0] = '\0';
 
-    int pos = 1; // saltar o C
+    int pos = 1;
     while (pos + 2 <= size)
     {
         unsigned char t = packet[pos++];
@@ -95,17 +80,12 @@ static int parseControlPacket(const unsigned char *packet, int size,
             memcpy(fileName, packet + pos, n);
             fileName[n] = '\0';
         }
-        // outros tipos: ignorar
 
         pos += l;
     }
 
     return (*fileSize >= 0 && pos == size) ? 0 : -1;
 }
-
-// ---------------------------------------------------------------------------
-// Emissor
-// ---------------------------------------------------------------------------
 
 static void sendFile(LinkLayer llParameters, const char *filename)
 {
@@ -120,7 +100,6 @@ static void sendFile(LinkLayer llParameters, const char *filename)
     long fileSize = ftell(file);
     fseek(file, 0, SEEK_SET);
 
-    // So o nome, sem o caminho
     const char *name = strrchr(filename, '/');
     name = name ? name + 1 : filename;
 
@@ -162,8 +141,8 @@ static void sendFile(LinkLayer llParameters, const char *filename)
         }
 
         packet[0] = C_DATA;
-        packet[1] = (n >> 8) & 0xFF; // L2
-        packet[2] = n & 0xFF;        // L1
+        packet[1] = (n >> 8) & 0xFF;
+        packet[2] = n & 0xFF;
 
         if (llSend(packet, DATA_HEADER_SIZE + n) < 0)
         {
@@ -177,7 +156,6 @@ static void sendFile(LinkLayer llParameters, const char *filename)
         printf("[APP] Enviados %ld / %ld bytes\n", sent, fileSize);
     }
 
-    // END repete a informacao do START
     ctrlLen = buildControlPacket(C_END, fileSize, name, packet);
     if (llSend(packet, ctrlLen) < 0)
         printf("[APP] Erro a enviar pacote END\n");
@@ -187,10 +165,6 @@ static void sendFile(LinkLayer llParameters, const char *filename)
     fclose(file);
     llCloseTx();
 }
-
-// ---------------------------------------------------------------------------
-// Recetor
-// ---------------------------------------------------------------------------
 
 static void receiveFile(LinkLayer llParameters, const char *filename)
 {
@@ -230,7 +204,6 @@ static void receiveFile(LinkLayer llParameters, const char *filename)
 
             if (file == NULL)
             {
-                // O ficheiro e gravado com o nome dado na linha de comandos
                 file = fopen(filename, "wb");
                 if (file == NULL)
                 {
@@ -330,8 +303,6 @@ static void receiveFile(LinkLayer llParameters, const char *filename)
 
     llCloseRx();
 }
-
-// ---------------------------------------------------------------------------
 
 void applicationLayer(const char *serialPort, const char *role, int baudRate,
                       int nTries, int timeout, const char *filename)

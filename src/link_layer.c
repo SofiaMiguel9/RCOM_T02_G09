@@ -1,6 +1,3 @@
-// Link layer protocol implementation
-// RCOM 2026/2027 - Lab 1 (M2 + M3 + M4 + M5)
-
 #define _POSIX_C_SOURCE 200809L
 
 #include "link_layer.h"
@@ -13,31 +10,21 @@
 #include <time.h>
 #include <unistd.h>
 
-// ---------------------------------------------------------------------------
-// Constantes do protocolo
-// ---------------------------------------------------------------------------
-
 #define FLAG 0x7E
 #define ESC 0x7D
 #define STUFF_XOR 0x20
 
-#define A_TX 0x03 // comandos do emissor / respostas do recetor
-#define A_RX 0x01 // comandos do recetor / respostas do emissor (DISC/UA no fecho)
+#define A_TX 0x03
+#define A_RX 0x01
 
 #define C_SET 0x03
 #define C_UA 0x07
 #define C_DISC 0x0B
-#define C_I(n) ((unsigned char)((n) << 7))     // I0 = 0x00, I1 = 0x80
-#define C_RR(n) ((unsigned char)(0xAA | (n)))  // RR0 = 0xAA, RR1 = 0xAB
-#define C_REJ(n) ((unsigned char)(0x54 | (n))) // REJ0 = 0x54, REJ1 = 0x55
+#define C_I(n) ((unsigned char)((n) << 7))
+#define C_RR(n) ((unsigned char)(0xAA | (n)))
+#define C_REJ(n) ((unsigned char)(0x54 | (n)))
 
-// Pior caso de uma trama I depois do stuffing:
-// F A C BCC1 + (dados + BCC2) a dobrar + F
 #define MAX_FRAME_SIZE (4 + 2 * (MAX_PAYLOAD_SIZE + 1) + 1)
-
-// ---------------------------------------------------------------------------
-// Tipos e estado global
-// ---------------------------------------------------------------------------
 
 typedef enum
 {
@@ -51,35 +38,33 @@ typedef enum
     ST_STOP
 } FrameState;
 
-// Trama recebida, ja sem stuffing
 typedef struct
 {
     unsigned char a;
     unsigned char c;
-    unsigned char data[MAX_PAYLOAD_SIZE + 1]; // dados + BCC2
-    int hasData; // FALSE = trama de supervisao (SET, UA, RR, REJ, DISC)
-    int dataLen; // bytes de dados, sem o BCC2
+    unsigned char data[MAX_PAYLOAD_SIZE + 1];
+    int hasData;
+    int dataLen;
     int bcc2Ok;
 } Frame;
 
-static LinkLayer linkParams; // guardado no llOpen, usado no llSend
-static int txNs = 0;         // Ns da proxima trama I a enviar (emissor)
-static int rxExpected = 0;   // Ns da proxima trama I esperada (recetor)
+static LinkLayer linkParams;
+static int txNs = 0;
+static int rxExpected = 0;
 static int rxDiscPending = FALSE;
 
-// Estatisticas do protocolo (mostradas no llClose)
 typedef struct
 {
-    int framesSent;       // todas as tramas escritas (I + supervisao)
-    int framesReceived;   // tramas recebidas com cabecalho valido
-    int iFramesSent;      // tramas I enviadas (inclui retransmissoes)
-    int iFramesAccepted;  // tramas I novas entregues a aplicacao
-    int retransmissions;  // reenvios (SET, I ou DISC)
-    int timeouts;         // timeouts do alarme
-    int rejSent;          // REJ enviados (erro nos dados)
-    int rejReceived;      // REJ recebidos
-    int duplicates;       // tramas I duplicadas descartadas
-    long payloadBytes;    // bytes de dados confirmados / entregues
+    int framesSent;
+    int framesReceived;
+    int iFramesSent;
+    int iFramesAccepted;
+    int retransmissions;
+    int timeouts;
+    int rejSent;
+    int rejReceived;
+    int duplicates;
+    long payloadBytes;
     struct timespec start;
     struct timespec transferStart;
     struct timespec transferEnd;
@@ -92,18 +77,11 @@ static volatile sig_atomic_t alarmTriggered = FALSE;
 static struct sigaction previousAct;
 static int alarmInstalled = FALSE;
 
-// ---------------------------------------------------------------------------
-// Alarme
-// ---------------------------------------------------------------------------
-
 static void alarmHandler(int signalNumber)
 {
     (void)signalNumber;
     alarmTriggered = TRUE;
 
-    // Volta a armar 1 s. Se o sinal chegar entre o teste da flag e a entrada
-    // no read() bloqueante, o proximo SIGALRM interrompe-o. Quem chamou
-    // cancela sempre com alarm(0), por isso isto nunca dispara "a mais".
     alarm(1);
 }
 
@@ -113,7 +91,7 @@ static int installAlarm(void)
     memset(&act, 0, sizeof(act));
     act.sa_handler = alarmHandler;
     sigemptyset(&act.sa_mask);
-    act.sa_flags = 0; // sem SA_RESTART: o read() bloqueado devolve EINTR
+    act.sa_flags = 0;
 
     if (sigaction(SIGALRM, &act, &previousAct) == -1)
     {
@@ -145,10 +123,6 @@ static void stopTimer(void)
 {
     alarm(0);
 }
-
-// ---------------------------------------------------------------------------
-// Auxiliares de envio
-// ---------------------------------------------------------------------------
 
 static const char *frameName(unsigned char c)
 {
@@ -202,7 +176,6 @@ static int sendSupervisionFrame(unsigned char a, unsigned char c)
     return 0;
 }
 
-// Escreve um byte em out[pos] com stuffing. Devolve a nova posicao.
 static int stuffByte(unsigned char *out, int pos, unsigned char byte)
 {
     if (byte == FLAG || byte == ESC)
@@ -217,17 +190,10 @@ static int stuffByte(unsigned char *out, int pos, unsigned char byte)
     return pos;
 }
 
-// ---------------------------------------------------------------------------
-// Rececao: maquina de estados unica para todas as tramas
-// ---------------------------------------------------------------------------
-
-// Le uma trama com endereco 'a'. Tramas com o cabecalho errado sao ignoradas.
-// Devolve 1 se recebeu uma trama, 0 se o alarme disparou (so com useTimeout),
-// -1 em caso de erro.
 static int receiveFrame(unsigned char a, Frame *f, int useTimeout)
 {
     FrameState state = ST_START;
-    int len = 0; // bytes guardados em f->data (dados + BCC2)
+    int len = 0;
 
     while (state != ST_STOP)
     {
@@ -240,12 +206,12 @@ static int receiveFrame(unsigned char a, Frame *f, int useTimeout)
         if (res < 0)
         {
             if (errno == EINTR)
-                continue; // interrompido pelo alarme: o while volta a testar a flag
+                continue;
             perror("readByteSerialPort");
             return -1;
         }
         if (res == 0)
-            continue; // nao chegou nada
+            continue;
 
         switch (state)
         {
@@ -283,13 +249,13 @@ static int receiveFrame(unsigned char a, Frame *f, int useTimeout)
             else if (byte == FLAG)
                 state = ST_FLAG_RCV;
             else
-                state = ST_START; // erro no cabecalho: ignorar a trama
+                state = ST_START;
             break;
 
         case ST_BCC1_OK:
         case ST_DATA:
             if (byte == FLAG)
-                state = ST_STOP; // len == 0 => trama de supervisao
+                state = ST_STOP;
             else if (byte == ESC)
                 state = ST_DATA_ESC;
             else if (len < (int)sizeof(f->data))
@@ -298,12 +264,12 @@ static int receiveFrame(unsigned char a, Frame *f, int useTimeout)
                 state = ST_DATA;
             }
             else
-                state = ST_START; // trama demasiado grande: descartar
+                state = ST_START;
             break;
 
         case ST_DATA_ESC:
             if (byte == FLAG)
-                state = ST_FLAG_RCV; // escape invalido: pode ser o inicio de outra trama
+                state = ST_FLAG_RCV;
             else if (len < (int)sizeof(f->data))
             {
                 f->data[len++] = byte ^ STUFF_XOR;
@@ -328,7 +294,6 @@ static int receiveFrame(unsigned char a, Frame *f, int useTimeout)
         return 1;
     }
 
-    // O ultimo byte e o BCC2
     f->dataLen = len - 1;
     unsigned char bcc2 = 0;
     for (int i = 0; i < f->dataLen; i++)
@@ -338,9 +303,6 @@ static int receiveFrame(unsigned char a, Frame *f, int useTimeout)
     return 1;
 }
 
-// Espera, com o alarme ligado, por uma trama de supervisao cujo C seja um
-// dos aceites. As outras sao ignoradas (ex: um RR atrasado).
-// Devolve 1 (com *cOut preenchido), 0 em timeout, -1 em erro.
 static int waitForReply(unsigned char a, const unsigned char *accepted,
                         int nAccepted, unsigned char *cOut)
 {
@@ -366,10 +328,6 @@ static int waitForReply(unsigned char a, const unsigned char *accepted,
     }
 }
 
-// ---------------------------------------------------------------------------
-// API
-// ---------------------------------------------------------------------------
-
 int llOpenTx(LinkLayer llParameters)
 {
     if (llParameters.timeout <= 0 || llParameters.nRetransmissions < 0)
@@ -390,7 +348,6 @@ int llOpenTx(LinkLayer llParameters)
     }
     printf("Serial port %s opened\n", linkParams.serialPort);
 
-    // O handler fica instalado ate ao llCloseTx, porque o llSend tambem o usa
     if (installAlarm() < 0)
     {
         closeSerialPort();
@@ -485,7 +442,6 @@ int llSend(const unsigned char *buf, int bufSize)
         stats.transferStarted = TRUE;
     }
 
-    // Montar a trama I: F A C BCC1 [dados + BCC2 com stuffing] F
     static unsigned char frame[MAX_FRAME_SIZE];
     unsigned char c = C_I(txNs);
     int len = 0;
@@ -495,7 +451,7 @@ int llSend(const unsigned char *buf, int bufSize)
     frame[len++] = c;
     frame[len++] = A_TX ^ c;
 
-    unsigned char bcc2 = 0; // calculado sobre os bytes originais
+    unsigned char bcc2 = 0;
     for (int i = 0; i < bufSize; i++)
     {
         bcc2 ^= buf[i];
@@ -504,8 +460,6 @@ int llSend(const unsigned char *buf, int bufSize)
     len = stuffByte(frame, len, bcc2);
     frame[len++] = FLAG;
 
-    // Respostas que interessam: RR com o numero seguinte (confirmado) ou
-    // REJ com o numero desta trama (erro nos dados). O resto e ignorado.
     const unsigned char accepted[] = {C_RR(1 - txNs), C_REJ(txNs)};
 
     for (int attempt = 0; attempt <= linkParams.nRetransmissions; attempt++)
@@ -581,7 +535,6 @@ int llReceive(unsigned char *packet)
                 printf("DISC recebido antes do fim da transferencia\n");
                 return -1;
             }
-            // A UA do llOpen perdeu-se e o emissor voltou a mandar SET
             if (f.c == C_SET)
             {
                 printf("SET repetido: a reenviar UA\n");
@@ -607,7 +560,6 @@ int llReceive(unsigned char *packet)
             }
             else
             {
-                // Duplicada com erro: basta confirmar o que ja temos
                 if (sendSupervisionFrame(A_TX, C_RR(rxExpected)) < 0)
                     return -1;
             }
@@ -616,7 +568,6 @@ int llReceive(unsigned char *packet)
 
         if (ns != rxExpected)
         {
-            // O RR anterior perdeu-se e o emissor reenviou: confirmar e descartar
             printf("I%d duplicada: descartada\n", ns);
             stats.duplicates++;
             if (sendSupervisionFrame(A_TX, C_RR(rxExpected)) < 0)
@@ -624,7 +575,6 @@ int llReceive(unsigned char *packet)
             continue;
         }
 
-        // Trama nova e sem erros: entregar a aplicacao e confirmar
         memcpy(packet, f.data, f.dataLen);
         printf("Recebida I%d (%d bytes de dados)\n", ns, f.dataLen);
         stats.iFramesAccepted++;
@@ -638,10 +588,6 @@ int llReceive(unsigned char *packet)
         return f.dataLen;
     }
 }
-
-// ---------------------------------------------------------------------------
-// Fecho e estatisticas
-// ---------------------------------------------------------------------------
 
 static void printStatistics(const char *role)
 {
@@ -683,7 +629,6 @@ static void printStatistics(const char *role)
     printf("================================\n");
 }
 
-// Emissor: DISC -> (espera DISC) -> UA
 int llCloseTx()
 {
     int result = -1;
@@ -700,7 +645,6 @@ int llCloseTx()
         if (sendSupervisionFrame(A_TX, C_DISC) < 0)
             break;
 
-        // O DISC do recetor e um comando do recetor: A = 0x01
         unsigned char reply;
         startTimer();
         int r = waitForReply(A_RX, accepted, 1, &reply);
@@ -711,7 +655,6 @@ int llCloseTx()
         if (r == 1)
         {
             printf("DISC recebido.\n");
-            // UA e resposta a um comando do recetor: A = 0x01
             if (sendSupervisionFrame(A_RX, C_UA) == 0)
             {
                 result = 0;
@@ -767,7 +710,6 @@ int llCloseTx()
     return result;
 }
 
-// Recetor: (espera DISC) -> DISC -> (espera UA)
 int llCloseRx()
 {
     int result = -1;
@@ -779,7 +721,6 @@ int llCloseRx()
         return -1;
     }
 
-    // Esperar pelo DISC do emissor
     while (!rxDiscPending)
     {
         if (receiveFrame(A_TX, &f, FALSE) < 0)
@@ -788,7 +729,6 @@ int llCloseRx()
         if (!f.hasData && f.c == C_DISC)
             break;
 
-        // A ultima trama I foi reenviada (o RR perdeu-se): voltar a confirmar
         if (f.hasData && (f.c == C_I(0) || f.c == C_I(1)))
         {
             printf("I%d duplicada: descartada\n", f.c == C_I(1));
@@ -810,7 +750,6 @@ int llCloseRx()
             printf("Retransmissao DISC %d de %d\n", attempt, linkParams.nRetransmissions);
         }
 
-        // DISC do recetor e um comando do recetor: A = 0x01
         if (sendSupervisionFrame(A_RX, C_DISC) < 0)
             break;
 
