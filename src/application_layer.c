@@ -4,6 +4,7 @@
 #include "application_layer.h"
 #include "link_layer.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -77,9 +78,15 @@ static int parseControlPacket(const unsigned char *packet, int size,
 
         if (t == T_FILE_SIZE)
         {
+            if (l == 0 || l > sizeof(long) || *fileSize >= 0)
+                return -1;
             long v = 0;
             for (int i = 0; i < l; i++)
-                v = (v << 8) | packet[pos + i];
+            {
+                if (v > (LONG_MAX - packet[pos + i]) / 256)
+                    return -1;
+                v = v * 256 + packet[pos + i];
+            }
             *fileSize = v;
         }
         else if (t == T_FILE_NAME)
@@ -196,6 +203,8 @@ static void receiveFile(LinkLayer llParameters, const char *filename)
     long received = 0;
     char name[256];
     int done = FALSE;
+    int failed = FALSE;
+    int endReceived = FALSE;
 
     while (!done)
     {
@@ -214,6 +223,7 @@ static void receiveFile(LinkLayer llParameters, const char *filename)
             if (parseControlPacket(packet, size, &fileSize, name, sizeof(name)) < 0)
             {
                 printf("[APP] Pacote START invalido\n");
+                failed = TRUE;
                 break;
             }
             printf("[APP] START: %s (%ld bytes)\n", name, fileSize);
@@ -225,6 +235,7 @@ static void receiveFile(LinkLayer llParameters, const char *filename)
                 if (file == NULL)
                 {
                     perror(filename);
+                    failed = TRUE;
                     done = TRUE;
                 }
             }
@@ -235,11 +246,13 @@ static void receiveFile(LinkLayer llParameters, const char *filename)
             if (file == NULL)
             {
                 printf("[APP] Pacote de dados antes do START: ignorado\n");
+                failed = TRUE;
                 break;
             }
             if (size < DATA_HEADER_SIZE)
             {
                 printf("[APP] Pacote de dados demasiado pequeno\n");
+                failed = TRUE;
                 break;
             }
 
@@ -248,10 +261,24 @@ static void receiveFile(LinkLayer llParameters, const char *filename)
             {
                 printf("[APP] Tamanho do pacote nao bate certo (%d != %d)\n",
                        k, size - DATA_HEADER_SIZE);
+                failed = TRUE;
                 break;
             }
 
-            fwrite(packet + DATA_HEADER_SIZE, 1, k, file);
+            if (failed)
+                break;
+            if (k > fileSize - received)
+            {
+                printf("[APP] Dados excedem o tamanho indicado no START\n");
+                failed = TRUE;
+                break;
+            }
+            if (fwrite(packet + DATA_HEADER_SIZE, 1, k, file) != (size_t)k)
+            {
+                perror("fwrite");
+                failed = TRUE;
+                break;
+            }
             received += k;
             printf("[APP] Recebidos %ld / %ld bytes\n", received, fileSize);
             break;
@@ -261,16 +288,25 @@ static void receiveFile(LinkLayer llParameters, const char *filename)
         {
             long endSize;
             char endName[256];
-            if (parseControlPacket(packet, size, &endSize, endName, sizeof(endName)) < 0)
+            if (file == NULL ||
+                parseControlPacket(packet, size, &endSize, endName, sizeof(endName)) < 0)
+            {
                 printf("[APP] Pacote END invalido\n");
+                failed = TRUE;
+            }
             else if (endSize != fileSize || strcmp(endName, name) != 0)
-                printf("[APP] Aviso: END nao coincide com o START\n");
+            {
+                printf("[APP] Erro: END nao coincide com o START\n");
+                failed = TRUE;
+            }
 
-            if (received == fileSize)
-                printf("[APP] Ficheiro recebido (%ld bytes)\n", received);
-            else
-                printf("[APP] Aviso: recebidos %ld bytes, esperados %ld\n",
+            if (received != fileSize)
+            {
+                printf("[APP] Erro: recebidos %ld bytes, esperados %ld\n",
                        received, fileSize);
+                failed = TRUE;
+            }
+            endReceived = TRUE;
             done = TRUE;
             break;
         }
@@ -281,8 +317,16 @@ static void receiveFile(LinkLayer llParameters, const char *filename)
         }
     }
 
-    if (file != NULL)
-        fclose(file);
+    if (file != NULL && fclose(file) != 0)
+    {
+        perror("fclose");
+        failed = TRUE;
+    }
+
+    if (endReceived && !failed)
+        printf("[APP] Ficheiro recebido (%ld bytes)\n", received);
+    else
+        printf("[APP] Transferencia nao concluida corretamente\n");
 
     llCloseRx();
 }

@@ -80,6 +80,9 @@ typedef struct
     int duplicates;       // tramas I duplicadas descartadas
     long payloadBytes;    // bytes de dados confirmados / entregues
     struct timespec start;
+    struct timespec transferStart;
+    struct timespec transferEnd;
+    int transferStarted;
 } Statistics;
 
 static Statistics stats;
@@ -462,6 +465,12 @@ int llSend(const unsigned char *buf, int bufSize)
         return -1;
     }
 
+    if (!stats.transferStarted)
+    {
+        clock_gettime(CLOCK_MONOTONIC, &stats.transferStart);
+        stats.transferStarted = TRUE;
+    }
+
     // Montar a trama I: F A C BCC1 [dados + BCC2 com stuffing] F
     static unsigned char frame[MAX_FRAME_SIZE];
     unsigned char c = C_I(txNs);
@@ -519,6 +528,7 @@ int llSend(const unsigned char *buf, int bufSize)
         {
             printf("Recebido %s\n", frameName(reply));
             stats.payloadBytes += bufSize;
+            clock_gettime(CLOCK_MONOTONIC, &stats.transferEnd);
             txNs = 1 - txNs;
             return bufSize;
         }
@@ -535,6 +545,12 @@ int llReceive(unsigned char *packet)
 {
     if (packet == NULL)
         return -1;
+
+    if (!stats.transferStarted)
+    {
+        clock_gettime(CLOCK_MONOTONIC, &stats.transferStart);
+        stats.transferStarted = TRUE;
+    }
 
     Frame f;
 
@@ -593,6 +609,7 @@ int llReceive(unsigned char *packet)
         printf("Recebida I%d (%d bytes de dados)\n", ns, f.dataLen);
         stats.iFramesAccepted++;
         stats.payloadBytes += f.dataLen;
+        clock_gettime(CLOCK_MONOTONIC, &stats.transferEnd);
 
         rxExpected = 1 - rxExpected;
         if (sendSupervisionFrame(A_TX, C_RR(rxExpected)) < 0)
@@ -634,10 +651,13 @@ static void printStatistics(const char *role)
         printf("Timeouts:                 %d\n", stats.timeouts);
         printf("Bytes de dados recebidos: %ld\n", stats.payloadBytes);
     }
-    if (elapsed > 0)
+    double transferTime = (stats.transferEnd.tv_sec - stats.transferStart.tv_sec) +
+                          (stats.transferEnd.tv_nsec - stats.transferStart.tv_nsec) / 1e9;
+    if (stats.transferStarted && stats.payloadBytes > 0 && transferTime > 0)
     {
-        double bitrate = stats.payloadBytes * 8 / elapsed;
-        printf("Debito util (R):          %.1f bit/s\n", bitrate);
+        double bitrate = stats.payloadBytes * 8 / transferTime;
+        printf("Tempo de transferencia:   %.3f s\n", transferTime);
+        printf("Debito de payload (R):    %.1f bit/s\n", bitrate);
         printf("Eficiencia (R/C):         %.4f\n", bitrate / linkParams.baudRate);
     }
     printf("================================\n");
@@ -673,7 +693,36 @@ int llCloseTx()
             printf("DISC recebido.\n");
             // UA e resposta a um comando do recetor: A = 0x01
             if (sendSupervisionFrame(A_RX, C_UA) == 0)
+            {
                 result = 0;
+                alarmTriggered = FALSE;
+                unsigned int closeWait = (unsigned int)linkParams.timeout *
+                                         ((unsigned int)linkParams.nRetransmissions + 1);
+                printf("A aguardar DISC repetidos durante %u segundos\n", closeWait);
+                alarm(closeWait);
+                Frame f;
+                while (TRUE)
+                {
+                    int received = receiveFrame(A_RX, &f, TRUE);
+                    if (received == 0)
+                        break;
+                    if (received < 0)
+                    {
+                        result = -1;
+                        break;
+                    }
+                    if (!f.hasData && f.c == C_DISC)
+                    {
+                        printf("DISC repetido: a reenviar UA\n");
+                        if (sendSupervisionFrame(A_RX, C_UA) < 0)
+                        {
+                            result = -1;
+                            break;
+                        }
+                    }
+                }
+                stopTimer();
+            }
             break;
         }
 
