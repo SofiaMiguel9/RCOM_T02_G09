@@ -502,7 +502,9 @@ int llSend(const unsigned char *buf, int bufSize)
         }
 
         stats.rejReceived++;
+        stats.retransmissions++;
         printf("Recebido %s: erro nos dados, a retransmitir\n", frameName(reply));
+        attempt = -1;
     }
 
     printf("Limite de retransmissoes atingido (I%d)\n", txNs);
